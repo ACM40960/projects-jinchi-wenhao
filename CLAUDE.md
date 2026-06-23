@@ -46,36 +46,42 @@
 7. **SDK 弃用**：`google.generativeai` 已被官方标记弃用，建议迁到 `google.genai`（`llm/providers/gemini_client.py`）。
 8. **冷启动与成本**：容器镜像 + 原生依赖冷启动较慢；按时长计费，长跑任务（网络等 Gemini 的空等时间也计费）成本需估。
 
-### 目标架构：方案 A —— 容器镜像异步 Lambda + S3 + 轮询（已选定）
+### 目标架构：方案 ① —— 容器镜像同步 Lambda + Function URL（已选定，2026-06-23）
 
-策略 **先 A 后 B**：先用方案 A 跑通「进图→出结果」的部署闭环；若单图速度或 15min 超时成为瓶颈，再演进到方案 B（Step Functions + detect Map 真并行）。A 用异步 job 模型，绕开 API Gateway 29s 与 Lambda 15min 同步等待两座大山。
+> **定位**：个人 demo / 作品集。低并发、几乎无并发；最看重「部署简单 + 闲时不烧钱（缩容到 0）」，单图慢一点、冷启动可接受。
+> **决策**：用 **Lambda 容器镜像 + Function URL 同步直连**，不走异步 job 模型。复杂度的根源是异步那套（S3 + DynamoDB + 轮询），不是 Lambda 本身；同步方案把它整套砍掉。Function URL 没有 API Gateway 的 29s 集成超时，可同步等到 Lambda 上限 15min。Lambda 天然缩容到 0、按调用计费——独占「闲时 0 成本」，正中 demo 诉求。
+> **历史**：本节原为「方案 A（异步 Lambda + S3 + DynamoDB + 轮询）」，2026-06-23 头脑风暴后改为方案 ①。放宽约束「只要 AWS 即可、不必 Lambda」后，对比过 App Runner（常驻、心智简单但闲时最低计费 ~$5+/月，与不烧钱冲突）与异步 job（体验好但对 demo overkill），最终因「缩容到 0 + 砍掉异步组件」选定同步 Lambda。
 
 ```
-Client ──POST 图──> API Gateway ──> [Lambda: submit]（轻，同步秒回）
-                                       1. 原图存 S3  s3://<bucket>/input/{job_id}.jpg
-                                       2. 写 job=PENDING 到 DynamoDB
-                                       3. 异步 invoke worker（Event 模式）
-                                       4. 返回 {job_id}
-                                     [Lambda: worker]（重，容器镜像，跑 run_pipeline）
-                                       1. 从 S3 取图到 /tmp
-                                       2. run_pipeline(image_path) → bbox + 结果图
-                                       3. 结果图传 S3  s3://<bucket>/output/{job_id}.jpg
-                                       4. 写 job=DONE + bbox（或 FAILED + error）到 DynamoDB
-Client ──GET /result?job_id──> API Gateway ──> [Lambda: status]
-                                       读 DynamoDB；DONE 则返回 bbox + 结果图 presigned URL
+Browser（极简前端页：上传图 + 显示结果图）
+  │  POST multipart（图片）
+  ▼
+Lambda Function URL ──> [Lambda: 单函数同步，容器镜像，跑 run_pipeline]
+                          1. 收图写入 /tmp/{uuid}.jpg
+                          2. run_pipeline(image_path) → bbox + 结果标注图（写 /tmp）
+                          3. 同步返回 {bbox, result_image}（base64 内联，或回传 base64 数据 URL）
+  ◀───────────────────────  浏览器拿到 bbox + 结果图直接渲染
 ```
 
-**组件**：
-- **Lambda × 2**：`submit`/`status`（轻，可同一函数多路由）+ `worker`（重，容器镜像，跑流水线）。
-- **S3**：input/ 原图、output/ 结果图（presigned URL 回传）。
-- **DynamoDB**：job 状态表 `{job_id(PK), status, bbox, result_key, error, ttl}`。
-- **密钥**：`GOOGLE_API_KEY` 走 Lambda 环境变量 / Secrets Manager。
+**组件**（刻意最小化）：
+- **Lambda × 1**：容器镜像，同步入口，包 `run_pipeline`。无 submit/worker/status 拆分。
+- **前端**：单个极简 HTML 页（上传图 → POST Function URL → 显示标注结果图）。可由同一 Lambda 直接返回 HTML，或托管到 S3 静态网站 / 本地打开；前端已在 2026-06-22 重构中删除，需重建最小版。
+- **存储**：**不引入 S3 / DynamoDB**。原图与结果图只在 `/tmp` 暂存，结果以 base64 随响应回传。
+- **密钥**：`GOOGLE_API_KEY` 走 Lambda 环境变量（或 Secrets Manager）。
+
+**未决风险 / 动工前必验**：
+1. **单图 < 15min？**（命门）当前 256px 切片下 ~30–80 次 detect + 1 verify、`MAX_CONCURRENT=10`，叠加 Gemini 偶发退避，估「数分钟级」。**动工前先本地实测一次单图耗时**；若逼近 15min 或网页同步等待体验太差，再考虑提并发 / 减 patch，或退回异步 job 模型。
+2. **同步等待体验**：浏览器/前面若挂 CDN 可能有 ~60s 超时；Function URL 直连无此限，但用户点上传后要干等数分钟（转圈），demo 可接受但需在前端给出「处理中」提示。
+3. **冷启动**：容器镜像 + 原生依赖（Pillow/grpc）冷启动数秒~十几秒；demo 可接受。
 
 **代码改造范围（Phase 2，逻辑不动 `agent/pipeline.py`）**：
-1. **I/O 抽象**：节点的文件读写（`detect.py:PATCH_DIR` / `verify.py:VERIFY_DIR` / `visualize.py:OUTPUT_DIR`）抽成可插拔 storage backend（local / S3-via-/tmp+upload），由配置/环境变量切换。
-2. **handler 模块**（如 `handler.py`）：`submit` / `worker` / `status` 三个入口。
-3. **打包**：Dockerfile（基于 AWS Lambda Python 基镜像）+ 部署脚本/IaC（SAM 或 Terraform，待定）。
-4. **SDK**：顺带把 `google.generativeai` 迁到 `google.genai`（已弃用）。
+1. **I/O 抽象**：节点的文件读写（`detect.py:PATCH_DIR` / `verify.py:VERIFY_DIR` / `visualize.py:OUTPUT_DIR`）改为可配置基目录，Lambda 下指向 `/tmp`（无需 S3 后端，单函数本地读写即可）。
+2. **handler 模块**（如 `handler.py`）：**单个同步入口**——收图 → 调 `run_pipeline` → 返回 bbox + 结果图 base64。
+3. **极简前端**：上传图 + 展示结果图的单页。
+4. **打包**：Dockerfile（基于 AWS Lambda Python 基镜像）+ 部署脚本/IaC（SAM 或 Terraform，待定）。
+5. **SDK**：顺带把 `google.generativeai` 迁到 `google.genai`（已弃用）。
+
+> 若将来单图速度或 15min 成为硬瓶颈，演进路径仍是异步 job（submit/worker/status + S3 + DynamoDB + 轮询）或 Step Functions + detect Map 真并行——但在 demo 阶段不预先引入。
 
 ---
 
@@ -295,7 +301,7 @@ WhereisWaldoAgent/
 
 ## 待确认 / 优化方向
 
-- [ ] **Lambda 化（当前主线）**：见上方「部署目标：AWS Lambda」，先定同步/异步 + 打包方式，再改 I/O 边界与 handler。
+- [ ] **Lambda 化（当前主线）**：架构已定为方案 ①（容器镜像同步 Lambda + Function URL，见上方「部署目标」）。动工前先**本地实测单图耗时**确认 < 15min，再改 I/O（指向 `/tmp`）+ 写同步 handler + 极简前端 + Dockerfile。
 - [ ] **量化评测**：对 `original-images/` 建立 ground truth 标注 + IoU 命中率脚本。当前只能靠单图肉眼定性验证；这是检验 detect 召回 / verify 准确率 / bbox 精度的唯一可靠手段。
 - [ ] **网络鲁棒性**：Gemini 调用偶发 504/503 超时（实测 2.jpg 跑挂 3 个 patch）；detect 已有 429 退避，但对 503/504/连接错误也应纳入重试。
 - [ ] **计费类 429 快速失败**：detect 的重试把**所有** 429 当限流退避（15→30→60→120s），但「额度耗尽 / 日配额超限」的 429 重试无用，会让每张图空转 ~27 分钟、并污染成假阴性。应识别计费类 429 **直接抛出不重试**。
