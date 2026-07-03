@@ -1,0 +1,10 @@
+run,best_epoch,precision,recall,mAP50,mAP50-95,kept
+waldo_tiled_768_s_80_vscode,65,0.49890,0.35644,0.28967,0.15775,yes
+waldo_tiled_416_center_neg05_s_80_vscode,55,0.85744,0.50774,0.54352,0.22785,yes
+waldo_tiled_416_center_neg025_s_40,16,0.72291,0.48429,0.51694,0.21316,no
+waldo_tiled_416_center_neg05_s_40,40,0.85240,0.50464,0.55535,0.21456,no
+waldo_tiled_416_center_neg05_s_80_baseaug,65,0.76021,0.53560,0.53640,0.22354,no
+waldo_tiled_416_center_neg05_s_80_tuned,55,0.85744,0.50774,0.54352,0.22785,yes
+waldo_tiled_416_neg05_s_img768_80,36,0.72224,0.43034,0.48279,0.19228,no
+waldo_tiled_416_tinyboost_neg05_s_80,38,0.84877,0.50798,0.52555,0.21955,no
+waldo_tiled_neg05_box_ft,9,0.66147,0.44892,0.46826,0.17750,no
