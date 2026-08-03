@@ -1,3 +1,4 @@
+
 # Environment & secrets
 .env
 .env.*
@@ -32,6 +33,10 @@ Thumbs.db
 
 # Outputs (generated at runtime)
 outputs/
+
+# AWS SAM build artifacts
+.aws-sam/
+deploy/.aws-sam/
 
 # Annotated images (generated results)
 original-images/*_annotated.jpg

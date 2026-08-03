@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where's Waldo — 自动定位</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fafafa; --muted:#6b7280; --line:#e2e2e4; --accent:#d92626; --card:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e8ea; --bg:#141416; --muted:#9a9aa2; --line:#2c2c31; --card:#1c1c20; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:32px 20px 64px; font:15px/1.6 -apple-system,"Segoe UI",Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
+         color:var(--fg); background:var(--bg); }
+  main { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 28px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:20px; }
+  button { font:inherit; padding:9px 18px; border-radius:7px; border:1px solid transparent;
+           background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=file] { font:inherit; max-width:100%; }
+  input[type=url] { font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; width:100%; padding:7px 9px;
+                    border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--fg); }
+  label.field { display:block; margin-top:14px; color:var(--muted); font-size:13px; }
+  #status { margin-top:14px; min-height:22px; }
+  .muted { color:var(--muted); }
+  .error { color:var(--accent); }
+  canvas { max-width:100%; height:auto; border-radius:8px; border:1px solid var(--line); display:block; }
+  .result-grid { display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; }
+  .result-grid figure { margin:0; }
+  .result-grid img { border-radius:8px; border:1px solid var(--line); display:block; max-width:100%; }
+  figcaption { color:var(--muted); font-size:13px; margin-top:6px; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:0; font-size:14px; }
+  dt { color:var(--muted); }
+  dd { margin:0; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Where's Waldo — 自动定位</h1>
+  <p class="sub">上传一张 Where's Waldo 图片，返回 Waldo 在原图中的坐标。整图会被切成 256px 小块逐块送进 Gemini，单张通常要等 <strong>30 秒到数分钟</strong>。</p>
+
+  <section class="card">
+    <input type="file" id="file" accept="image/*">
+    <button id="run" disabled>开始检测</button>
+    <label class="field" for="endpoint">接口地址（部署后从 Lambda 页面打开时无需修改）</label>
+    <input type="url" id="endpoint" placeholder="https://xxxx.lambda-url.eu-west-1.on.aws/detect">
+    <div id="status"></div>
+  </section>
+
+  <section class="card hidden" id="result">
+    <dl id="meta"></dl>
+    <div class="result-grid" style="margin-top:18px">
+      <figure>
+        <canvas id="canvas"></canvas>
+        <figcaption>原图 + 标注框</figcaption>
+      </figure>
+      <figure id="crop-figure" class="hidden">
+        <img id="crop" alt="Waldo 特写">
+        <figcaption>特写</figcaption>
+      </figure>
+    </div>
+  </section>
+</main>
+
+<script>
+// 上传前重新编码：Function URL 同步调用的请求 payload 上限 6MB，而原图可能有 4MB+。
+// 长边 3000px 以内的图只重压缩、不降分辨率，不伤小 Waldo 的检测。
+const MAX_EDGE = 3000, JPEG_QUALITY = 0.85;
+
+const $ = (id) => document.getElementById(id);
+const fileInput = $('file'), runBtn = $('run'), statusEl = $('status'), endpointEl = $('endpoint');
+let sourceImage = null, timerId = null;
+
+endpointEl.value = new URL('/detect', location.origin).href;
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) { runBtn.disabled = true; return; }
+  sourceImage = await loadImage(URL.createObjectURL(file));
+  runBtn.disabled = false;
+  setStatus(`已选择 ${file.name}（${sourceImage.width}×${sourceImage.height}，${(file.size / 1048576).toFixed(1)} MB）`, 'muted');
+  $('result').classList.add('hidden');
+});
+
+runBtn.addEventListener('click', async () => {
+  if (!sourceImage) return;
+  runBtn.disabled = true;
+  $('result').classList.add('hidden');
+  startTimer();
+  try {
+    const payload = { image: toCompressedDataUrl(sourceImage), filename: fileInput.files[0].name };
+    const res = await fetch(endpointEl.value, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
+    if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+    render(data);
+  } catch (err) {
+    setStatus(`失败：${err.message}`, 'error');
+  } finally {
+    stopTimer();
+    runBtn.disabled = false;
+  }
+});
+
+function render(data) {
+  stopTimer();
+  const secs = (data.elapsed_ms / 1000).toFixed(1);
+  setStatus(data.found ? `找到了，用时 ${secs} 秒` : `没找到 Waldo，用时 ${secs} 秒`,
+            data.found ? 'muted' : 'error');
+
+  $('meta').innerHTML = [
+    ['bbox (x, y, w, h)', data.bbox ? data.bbox.join(', ') : '—'],
+    ['判定来源', data.source === 'verified' ? 'verify 横向单选确认' : data.source === 'detect-only' ? 'detect 单候选（跳过 verify）' : '—'],
+    ['原图尺寸', data.image_size ? data.image_size.join(' × ') : '—'],
+    ['耗时', `${secs} s`],
+  ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+
+  drawResult(data.bbox);
+  const cropFigure = $('crop-figure');
+  if (data.crop) { $('crop').src = data.crop; cropFigure.classList.remove('hidden'); }
+  else { cropFigure.classList.add('hidden'); }
+  $('result').classList.remove('hidden');
+}
+
+// 服务端只回 bbox（原图坐标），红框在这里画——省掉一次数 MB 的整图往返。
+function drawResult(bbox) {
+  const canvas = $('canvas'), ctx = canvas.getContext('2d');
+  canvas.width = sourceImage.width;
+  canvas.height = sourceImage.height;
+  ctx.drawImage(sourceImage, 0, 0);
+  if (!bbox) return;
+  const [x, y, w, h] = bbox;
+  const pad = Math.max(w, h) * 1.2;
+  ctx.strokeStyle = '#d92626';
+  ctx.lineWidth = Math.max(3, Math.round(canvas.width / 400));
+  ctx.strokeRect(x - pad / 2, y - pad / 2, w + pad, h + pad);
+}
+
+function toCompressedDataUrl(img) {
+  const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('图片读取失败'));
+    img.src = src;
+  });
+}
+
+// 要干等数分钟，必须让用户看到进度在走
+function startTimer() {
+  const started = Date.now();
+  const tick = () => setStatus(`检测中… 已等待 ${Math.round((Date.now() - started) / 1000)} 秒（冷启动时首次会更慢）`, 'muted');
+  tick();
+  timerId = setInterval(tick, 1000);
+}
+
+function stopTimer() {
+  if (timerId) { clearInterval(timerId); timerId = null; }
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = cls || '';
+}
+</script>
+</body>
+</html>

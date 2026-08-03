@@ -1,0 +1,43 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Where's Waldo detector — 单个容器镜像 Lambda，挂 Function URL 同步对外。
+  一个函数同时提供前端页面（GET /）与检测接口（POST /detect）。
+
+Parameters:
+  GoogleApiKey:
+    Type: String
+    NoEcho: true
+    Description: Gemini API key（detect + verify 都用它）。部署时传入，不进镜像也不进 git。
+
+Resources:
+  WaldoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures:
+        - x86_64
+      # 单图约 30 秒到数分钟；900s 是 Lambda 上限，留足退避重试的余量
+      Timeout: 900
+      # 内存同时决定 CPU 配额，detect 有 10 线程并发 + Pillow 处理 2800px 大图
+      MemorySize: 2048
+      Environment:
+        Variables:
+          GOOGLE_API_KEY: !Ref GoogleApiKey
+          WALDO_OUTPUT_DIR: /tmp/outputs
+      FunctionUrlConfig:
+        # NONE = 公开可调用。每次调用都会花 Gemini 的钱，长期挂着请改 AWS_IAM 或加限流。
+        AuthType: NONE
+        InvokeMode: BUFFERED
+    Metadata:
+      Dockerfile: deploy/Dockerfile
+      DockerContext: ..
+      DockerTag: latest
+
+Outputs:
+  FunctionUrl:
+    Description: 直接在浏览器打开这个地址即可使用
+    Value: !GetAtt WaldoFunctionUrl.FunctionUrl
+  FunctionName:
+    Description: Lambda 函数名（查日志用：sam logs -n <name> --tail）
+    Value: !Ref WaldoFunction

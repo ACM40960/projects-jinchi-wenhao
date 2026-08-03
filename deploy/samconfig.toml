@@ -1,0 +1,21 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "whereis-waldo"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+region = "eu-west-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+# 让 SAM 自动创建/复用 ECR 仓库，省掉手工建仓与 docker login
+resolve_s3 = true
+resolve_image_repos = true
+# GOOGLE_API_KEY 不写在这里（会进 git）。用命令行传：
+#   sam deploy --parameter-overrides GoogleApiKey=$GOOGLE_API_KEY
+
+[default.sync.parameters]
+watch = false

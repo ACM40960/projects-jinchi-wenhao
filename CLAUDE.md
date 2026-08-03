@@ -30,10 +30,10 @@
 
 ---
 
-## 部署目标：AWS Lambda（2026-06-22，规划中）
+## 部署目标：AWS Lambda（脚手架已落地，2026-08-03）
 
 > **目标**：把整个项目部署为 AWS 上的 Lambda 函数，对外契约 = 进一张图 → 出一个识别结果（bbox + 结果图）。
-> **状态**：架构已选定（下方「目标架构：方案 ①」），代码改造尚未动工。下方「硬约束」是设计依据。
+> **状态**：架构见下方「目标架构：方案 ①」；**代码改造已完成**（`config.py` / `handler.py` / `web/index.html` / `deploy/`），设计文档见 `docs/superpowers/specs/2026-08-03-lambda-deployment-design.md`。**尚未真正部署上 AWS**（本地未装 Docker，镜像构建未验证）。下方「硬约束」是设计依据。
 
 ### 必须先解决的硬约束（决定怎么改）
 
@@ -53,33 +53,41 @@
 > **历史**：本节原为「方案 A（异步 Lambda + S3 + DynamoDB + 轮询）」，2026-06-23 头脑风暴后改为方案 ①。放宽约束「只要 AWS 即可、不必 Lambda」后，对比过 App Runner（常驻、心智简单但闲时最低计费 ~$5+/月，与不烧钱冲突）与异步 job（体验好但对 demo overkill），最终因「缩容到 0 + 砍掉异步组件」选定同步 Lambda。
 
 ```
-Browser（极简前端页：上传图 + 显示结果图）
-  │  POST multipart（图片）
+Browser（极简前端页 web/index.html：上传图 + 画框显示结果）
+  │  ① GET  /        ← 同一个 Lambda 直接返回这张 HTML
+  │  ② POST /detect  ← JSON {image: base64}（前端上传前 canvas 重压缩）
   ▼
 Lambda Function URL ──> [Lambda: 单函数同步，容器镜像，跑 run_pipeline]
-                          1. 收图写入 /tmp/{uuid}.jpg
+                          1. 收图写入 /tmp/outputs/uploads/{uuid}.jpg
                           2. run_pipeline(image_path) → bbox + 结果标注图（写 /tmp）
-                          3. 同步返回 {bbox, result_image}（base64 内联，或回传 base64 数据 URL）
-  ◀───────────────────────  浏览器拿到 bbox + 结果图直接渲染
+                          3. 同步返回 {found, bbox, source, crop, elapsed_ms, image_size}
+  ◀───────────────────────  浏览器拿 bbox 在自己那份原图上用 canvas 画红框
 ```
 
 **组件**（刻意最小化）：
-- **Lambda × 1**：容器镜像，同步入口，包 `run_pipeline`。无 submit/worker/status 拆分。
-- **前端**：单个极简 HTML 页（上传图 → POST Function URL → 显示标注结果图）。可由同一 Lambda 直接返回 HTML，或托管到 S3 静态网站 / 本地打开；前端已在 2026-06-22 重构中删除，需重建最小版。
-- **存储**：**不引入 S3 / DynamoDB**。原图与结果图只在 `/tmp` 暂存，结果以 base64 随响应回传。
-- **密钥**：`GOOGLE_API_KEY` 走 Lambda 环境变量（或 Secrets Manager）。
+- **Lambda × 1**：容器镜像，同步入口 `handler.lambda_handler`，包 `run_pipeline`。无 submit/worker/status 拆分。
+- **前端**：`web/index.html` 单页，由**同一个 Lambda 的 `GET /` 直接返回**，不建 S3 站点。
+- **存储**：**不引入 S3 / DynamoDB**。原图与产物只在 `/tmp` 暂存，每次请求前 `config.reset_run_dirs()` 清理、请求结束删上传图。
+- **密钥**：`GOOGLE_API_KEY` 走 Lambda 环境变量（SAM 参数注入，不进镜像、不进 git）。
 
-**未决风险 / 动工前必验**：
-1. **单图 < 15min？**（命门）当前 256px 切片下 ~30–80 次 detect + 1 verify、`MAX_CONCURRENT=10`，叠加 Gemini 偶发退避，估「数分钟级」。**动工前先本地实测一次单图耗时**；若逼近 15min 或网页同步等待体验太差，再考虑提并发 / 减 patch，或退回异步 job 模型。
-2. **同步等待体验**：浏览器/前面若挂 CDN 可能有 ~60s 超时；Function URL 直连无此限，但用户点上传后要干等数分钟（转圈），demo 可接受但需在前端给出「处理中」提示。
-3. **冷启动**：容器镜像 + 原生依赖（Pillow/grpc）冷启动数秒~十几秒；demo 可接受。
+**⚠️ payload 6MB 上限（决定了不回传整图）**：Function URL 同步调用的请求与响应 payload **各有 6MB 硬上限**，而 `original-images/14.jpg` 就有 4.1MB（base64 后约 5.5MB），上下行都会顶到限制。因此：
+- **上行**：前端 canvas 重新编码（长边 ≤ 3000px、JPEG q0.85）。测试集最大边长 2828px，等于只重压缩、不降分辨率，不伤小 Waldo 的检测。
+- **下行**：**只回 bbox + 一张 Waldo 特写小图**（长边 ≤ 480px），红框由前端在本地原图上画。响应从数 MB 降到几 KB。
+> 这条修正了本节原文「结果以 base64 整图随响应回传」的写法。
+
+**已验证 / 仍未决**：
+1. ✅ **单图 < 15min**：1.jpg 实测约 33s（单候选快路径、无退避），远低于 900s 上限。难图（2.jpg）最坏耗时仍未测。
+2. **同步等待体验**：Function URL 直连无 API Gateway 的 29s 限制；前端已给「检测中…已等待 N 秒」计时提示。
+3. **冷启动**：容器镜像 + 原生依赖（Pillow/grpc）预计数秒~十几秒；demo 可接受，未做 Provisioned Concurrency。
+4. ❗ **镜像未构建验证**：开发机没装 Docker，`deploy/Dockerfile` 只经过人工检查，`sam build` 尚未跑过。
+5. ❗ **`AuthType: NONE` 是公开 URL**：每次调用都花 Gemini 的钱（~$0.09/图）。长期挂着需改 `AWS_IAM` 或加限流。
 
 **代码改造范围（Phase 2，逻辑不动 `agent/pipeline.py`）**：
-1. **I/O 抽象**：节点的文件读写（`detect.py:PATCH_DIR` / `verify.py:VERIFY_DIR` / `visualize.py:OUTPUT_DIR`）改为可配置基目录，Lambda 下指向 `/tmp`（无需 S3 后端，单函数本地读写即可）。
-2. **handler 模块**（如 `handler.py`）：**单个同步入口**——收图 → 调 `run_pipeline` → 返回 bbox + 结果图 base64。
-3. **极简前端**：上传图 + 展示结果图的单页。
-4. **打包**：Dockerfile（基于 AWS Lambda Python 基镜像）+ 部署脚本/IaC（SAM 或 Terraform，待定）。
-5. **SDK**：顺带把 `google.generativeai` 迁到 `google.genai`（已弃用）。
+1. ✅ **I/O 抽象**：新增 `config.py`，三处硬编码目录改为 `patches_dir()/verify_dir()/results_dir()`，基目录取环境变量 `WALDO_OUTPUT_DIR`（Lambda 下为 `/tmp/outputs`）。
+2. ✅ **handler 模块**：`handler.py` 单个同步入口，`GET /` 返回页面、`POST /detect` 跑检测。
+3. ✅ **极简前端**：`web/index.html`。
+4. ✅ **打包**：`deploy/Dockerfile`（`public.ecr.aws/lambda/python:3.12`）+ `deploy/template.yaml`（SAM）+ `deploy/samconfig.toml` + `deploy/README.md`；根目录 `.dockerignore` **必须挡住 `yolo/`**（含 `.pt` 权重）。
+5. ⬜ **SDK**：把 `google.generativeai` 迁到 `google.genai`（已弃用）—— 未做。
 
 > 若将来单图速度或 15min 成为硬瓶颈，演进路径仍是异步 job（submit/worker/status + S3 + DynamoDB + 轮询）或 Step Functions + detect Map 真并行——但在 demo 阶段不预先引入。
 
@@ -124,6 +132,7 @@ google-generativeai>=0.7.0
 ### 环境变量（.env）
 
 - `GOOGLE_API_KEY` —— `gemini-3.5-flash` 调用所需（detect + verify）；`google.generativeai` 自动从环境读取。**唯一需要的 key。**
+- `WALDO_OUTPUT_DIR` —— 可选，运行产物基目录（见 `config.py`）。本地不设即用 `outputs/`；Lambda 镜像里设为 `/tmp/outputs`（只有 `/tmp` 可写）。
 
 `main.py` 启动时通过 `dotenv.load_dotenv()` 加载（缺失则跳过）。
 
@@ -133,10 +142,13 @@ google-generativeai>=0.7.0
 
 ```bash
 python main.py [图片路径]   # 默认 original-images/1.jpg；本地跑核心流水线、打印结果
-pytest tests/ -q            # 核心逻辑单测（无 API：切片 / 解析 / 路由）
+pytest tests/ -q            # 核心逻辑单测（无 API：切片 / 解析 / 路由 / handler / 结果提炼）
 ```
 
-入口 `run_pipeline(image_path)`（`agent/pipeline.py`），返回最终 `WaldoState`。
+入口 `run_pipeline(image_path)`（`agent/pipeline.py`），返回最终 `WaldoState`；
+`summarize(state)`（`agent/result.py`）把它压成 `{found, bbox, source, result_image_path}`，CLI 与 Lambda handler 共用。
+
+部署命令见 `deploy/README.md`（`sam build && sam deploy`）。
 
 ---
 
@@ -175,9 +187,10 @@ class WaldoState(TypedDict):
     original_image_path: str       # 原图路径
     candidates: list               # [{patch_bbox, confidence, has_waldo, verified, ...}, ...]
     verified_result: list | None   # [x, y, w, h]（原图坐标），未找到则 None
+    result_image_path: str | None  # visualize 落盘的标注图路径，未找到则 None
 ```
 
-`initial_state(image_path)`：只填 `original_image_path`，`candidates=[]`、`verified_result=None`；segment 节点负责把整图切成 candidates。
+`initial_state(image_path)`：只填 `original_image_path`，其余置空；segment 节点负责把整图切成 candidates。
 （旧字段 `focus_regions`/`iteration` 随 LangGraph 移除已一并删除；更早的 `grid_size`/`grid_rows`/`grid_cols` 随 analyze 删除已移除。）
 
 ---
@@ -189,7 +202,7 @@ class WaldoState(TypedDict):
 | `segment`（入口） | — | `original_image_path` | `candidates`（仅含 patch_bbox 等几何字段） | 确定性固定尺寸滑窗切片，TILE_SIZE×TILE_SIZE、末块贴边、跳过 < 150px 块。不调 VLM |
 | `detect` | gemini-3.5-flash | `candidates`, `original_image_path` | `candidates`（含 has_waldo / confidence） | 按 present(has_waldo) 二元信号过滤；confidence 透传但无判别意义、不用于排序 |
 | `verify` | gemini-3.5-flash | 全部 present 候选（上限 VERIFY_MAX，仅多候选时触发） | `candidates`（verified 字段）+ `verified_result` | 裁出带 padding 的区域，横向单选唯一真 Waldo |
-| `visualize` | — | `verified_result` / 最佳候选 | 标注图片路径 | 调用 `tools/visualize.py` 画红框 |
+| `visualize` | — | `verified_result` / 最佳候选 | `result_image_path` | 调用 `tools/visualize.py` 画红框并落盘，路径写回 state |
 
 ### 流水线组装（agent/pipeline.py）
 
@@ -250,6 +263,9 @@ get_vlm_client(provider="gemini")   # 当前仅 "gemini"
 | `nodes/verify.py` | `VERIFY_MAX` | 12 | 送横向单选的候选数安全上限；全部 present 候选一次性比较，仅多候选路径触发 |
 | | `SELECT_MAX_TOKENS` | 1024 | Gemini 横向单选响应 token 上限（含 per_image 数组） |
 | | `PADDING_RATIO` / `MIN_VERIFY_SIZE` | 0.3 / 120px | 裁剪 padding 与最小尺寸 |
+| `handler.py` | `CROP_PADDING_RATIO` / `CROP_MIN_SIZE` / `CROP_MAX_SIZE` | 0.6 / 200 / 480 | 回给页面的 Waldo 特写图：外扩比例、最小边长、长边上限（控响应体积） |
+| | `MAX_IMAGE_BYTES` | 8MB | 解码后原图字节上限，超出直接 400（Function URL payload 硬上限 6MB） |
+| `web/index.html` | `MAX_EDGE` / `JPEG_QUALITY` | 3000 / 0.85 | 前端上传前重压缩参数，防请求体撞 6MB |
 
 ---
 
@@ -259,13 +275,24 @@ get_vlm_client(provider="gemini")   # 当前仅 "gemini"
 WhereisWaldoAgent/
 ├── CLAUDE.md
 ├── main.py                      # 本地 runner：python main.py [图片路径] → run_pipeline
+├── handler.py                   # AWS Lambda 同步入口：GET / 返回页面，POST /detect 跑检测
+├── config.py                    # 运行产物目录（WALDO_OUTPUT_DIR，Lambda 下指向 /tmp/outputs）
 ├── prompts.py                   # DETECT_PROMPT / SELECT_PROMPT
 ├── requirements.txt             # 仅 pillow + google-generativeai
 ├── .env                         # GOOGLE_API_KEY
+├── .dockerignore                # 镜像瘦身：挡住 yolo/、original-images/、outputs/ 等
+├── web/
+│   └── index.html               # 极简前端单页（由 Lambda 的 GET / 直接返回）
+├── deploy/
+│   ├── Dockerfile               # 基于 public.ecr.aws/lambda/python:3.12
+│   ├── template.yaml            # SAM：Lambda（容器镜像）+ Function URL
+│   ├── samconfig.toml           # stack 名 / region 等部署参数
+│   └── README.md                # 部署命令清单
 ├── agent/
-│   ├── __init__.py              # 导出 run_pipeline / stream_pipeline
+│   ├── __init__.py              # 导出 run_pipeline / stream_pipeline / summarize
 │   ├── state.py                 # WaldoState + initial_state
 │   ├── pipeline.py              # run_pipeline / stream_pipeline / _run_nodes（纯函数编排）
+│   ├── result.py                # summarize(state)：CLI 与 handler 共用的结果提炼
 │   └── nodes/
 │       ├── __init__.py
 │       ├── segment.py           # 入口：确定性固定尺寸滑窗切片为 patch
@@ -282,18 +309,23 @@ WhereisWaldoAgent/
 ├── vision/                      # 图像处理 + 切分（无 VLM）
 │   ├── __init__.py
 │   ├── image_utils.py           # base64 编码、裁剪、保存
-│   └── segment.py               # tile_region（固定尺寸滑窗切片）+ waldo_orig_bbox
+│   └── segment.py               # tile_region（固定尺寸滑窗切片）+ waldo_orig_bbox + expand_bbox
 ├── tools/
 │   ├── __init__.py
 │   └── visualize.py             # visualize_result：画 bbox（普通函数，无 langchain）
 ├── tests/                       # 仅核心逻辑单测（无 API）
 │   ├── test_segment.py          # 切片几何 + segment 节点
 │   ├── test_vlm_parse.py        # VLM JSON 解析 + factory
-│   └── test_pipeline.py         # 流水线编排与路由
+│   ├── test_pipeline.py         # 流水线编排与路由
+│   ├── test_result.py           # summarize 的三条判定分支
+│   ├── test_config.py           # 输出目录切换与清理
+│   └── test_handler.py          # Lambda 路由 / 输入解析 / 错误码（打桩 run_pipeline）
+├── docs/superpowers/specs/      # 设计文档（含 2026-08-03 Lambda 部署设计）
 ├── original-images/             # 测试图片
-└── outputs/                     # 运行产物（gitignore）
+└── outputs/                     # 运行产物（gitignore；Lambda 下为 /tmp/outputs）
     ├── patches/                 # detect 裁出的 patch
     ├── verify/                  # verify 的特写裁剪
+    ├── uploads/                 # handler 落盘的上传图（请求结束即删）
     └── [basename]_result.jpg    # 最终标注图
 ```
 
@@ -301,7 +333,7 @@ WhereisWaldoAgent/
 
 ## 待确认 / 优化方向
 
-- [ ] **Lambda 化（当前主线）**：架构已定为方案 ①（容器镜像同步 Lambda + Function URL，见上方「部署目标」）。动工前先**本地实测单图耗时**确认 < 15min，再改 I/O（指向 `/tmp`）+ 写同步 handler + 极简前端 + Dockerfile。
+- [ ] **Lambda 化（当前主线）**：代码脚手架已落地（`config.py` / `handler.py` / `web/` / `deploy/`），单测全绿。**剩下的是真部署**：① 装 Docker 后跑 `sam build` 验证镜像能构建（现开发机无 Docker，Dockerfile 未验证）；② `sam deploy` 上 AWS 拿到 Function URL；③ 端到端跑一张真图，确认冷启动 + 单图耗时可接受。
 - [ ] **量化评测**：对 `original-images/` 建立 ground truth 标注 + IoU 命中率脚本。当前只能靠单图肉眼定性验证；这是检验 detect 召回 / verify 准确率 / bbox 精度的唯一可靠手段。
 - [ ] **网络鲁棒性**：Gemini 调用偶发 504/503 超时（实测 2.jpg 跑挂 3 个 patch）；detect 已有 429 退避，但对 503/504/连接错误也应纳入重试。
 - [ ] **计费类 429 快速失败**：detect 的重试把**所有** 429 当限流退避（15→30→60→120s），但「额度耗尽 / 日配额超限」的 429 重试无用，会让每张图空转 ~27 分钟、并污染成假阴性。应识别计费类 429 **直接抛出不重试**。
