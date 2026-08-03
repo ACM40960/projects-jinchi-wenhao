@@ -5,6 +5,7 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import config
 from agent.state import WaldoState
 from vision.image_utils import crop_to_pil, save_patch
 from vision.segment import waldo_orig_bbox
@@ -24,7 +25,7 @@ VLM_MODEL = "gemini-3.5-flash"
 # 旧配置（可切回作为备份）：VLM_PROVIDER="gpt4o" / VLM_MODEL="gpt-5.5"
 # DETECT_MAX_TOKENS：Gemini 非推理模型不需要这么高，保留不影响（其 call 用 max_output_tokens）。
 DETECT_MAX_TOKENS = 4096
-PATCH_DIR = "outputs/patches"
+# patch 落盘目录见 config.patches_dir()（本地 outputs/patches，Lambda 下 /tmp/outputs/patches）
 
 # 限流重试
 MAX_RETRIES = 4
@@ -43,7 +44,7 @@ def detect_node(state: WaldoState) -> dict:
     """
     vlm = get_vlm_client(VLM_PROVIDER, model=VLM_MODEL, max_tokens=DETECT_MAX_TOKENS)
     image_path = state["original_image_path"]
-    os.makedirs(PATCH_DIR, exist_ok=True)
+    patch_dir = config.patches_dir()
 
     # 1. 裁剪并保存所有 patch（超出上限时随机采样，避免系统性漏检右下角）
     candidates = list(state["candidates"])
@@ -58,7 +59,7 @@ def detect_node(state: WaldoState) -> dict:
         if pw < MIN_DETECT_PATCH_PX or ph < MIN_DETECT_PATCH_PX:
             skipped += 1
             continue
-        crop_path = os.path.join(PATCH_DIR, f"patch{i}.jpg")
+        crop_path = os.path.join(patch_dir, f"patch{i}.jpg")
         patch_img = crop_to_pil(image_path, cand["patch_bbox"])
         save_patch(patch_img, crop_path)
         tasks.append((i, cand, crop_path))

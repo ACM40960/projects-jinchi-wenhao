@@ -12,28 +12,24 @@ try:
 except ImportError:
     pass
 
-from agent import run_pipeline
+from agent import run_pipeline, summarize
 
 
 def main():
     image_path = sys.argv[1] if len(sys.argv) > 1 else "original-images/1.jpg"
     print(f"[main] Running Waldo detection on: {image_path}")
 
-    final_state = run_pipeline(image_path)
+    result = summarize(run_pipeline(image_path))
 
-    result = final_state.get("verified_result")
-    candidates = final_state.get("candidates") or []
-    # 单候选会跳过 verify（见 agent/pipeline.py），此时 verified_result 为 None
-    # 但仍是「相信 detect 高精度」的有信心结果。只有 verify 跑过才会写 verify_confidence。
-    verify_ran = any("verify_confidence" in c for c in candidates)
-    if result:
-        print(f"[main] Waldo confirmed (verified) at bbox: {result}")
-    elif candidates and not verify_ran:
-        best = candidates[0]
-        bbox = best.get("orig_bbox") or best.get("patch_bbox")
-        print(f"[main] Waldo located (detect-only, verify skipped) at bbox: {bbox}")
-    else:
+    if not result["found"]:
         print("[main] Waldo not found.")
+        return
+
+    if result["source"] == "verified":
+        print(f"[main] Waldo confirmed (verified) at bbox: {result['bbox']}")
+    else:
+        print(f"[main] Waldo located (detect-only, verify skipped) at bbox: {result['bbox']}")
+    print(f"[main] Annotated image → {result['result_image_path']}")
 
 
 if __name__ == "__main__":

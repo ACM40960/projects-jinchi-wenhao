@@ -9,9 +9,10 @@ import os
 
 from PIL import Image
 
+import config
 from agent.state import WaldoState
 from vision.image_utils import crop_to_pil, save_patch
-from vision.segment import waldo_orig_bbox
+from vision.segment import expand_bbox, waldo_orig_bbox
 from llm.vlm_client import get_vlm_client
 
 # ── 可调参数 ───────────────────────────────────────────────────────────
@@ -23,7 +24,7 @@ MIN_VERIFY_SIZE = 120       # 发给 VLM 的 verify 图最小边长（像素）
 VLM_PROVIDER = "gemini"
 VLM_MODEL = "gemini-3.5-flash"
 SELECT_MAX_TOKENS = 1024    # 横向单选输出含 per_image 数组，留足预算
-VERIFY_DIR = "outputs/verify"
+# 特写裁剪落盘目录见 config.verify_dir()（本地 outputs/verify，Lambda 下 /tmp/outputs/verify）
 
 
 def verify_node(state: WaldoState) -> dict:
@@ -39,7 +40,7 @@ def verify_node(state: WaldoState) -> dict:
     """
     vlm = get_vlm_client(VLM_PROVIDER, model=VLM_MODEL, max_tokens=SELECT_MAX_TOKENS)
     image_path = state["original_image_path"]
-    os.makedirs(VERIFY_DIR, exist_ok=True)
+    verify_dir = config.verify_dir()
 
     img = Image.open(image_path)
     img_w, img_h = img.size
@@ -54,9 +55,9 @@ def verify_node(state: WaldoState) -> dict:
     orig_bboxes: list[list[int]] = []
     for i, cand in enumerate(chosen):
         orig_bbox = waldo_orig_bbox(cand["patch_bbox"], cand.get("waldo_bbox_in_patch"))
-        padded_bbox = _expand_bbox(orig_bbox, img_w, img_h, PADDING_RATIO, MIN_VERIFY_SIZE)
+        padded_bbox = expand_bbox(orig_bbox, img_w, img_h, PADDING_RATIO, MIN_VERIFY_SIZE)
         crop_img = crop_to_pil(image_path, padded_bbox)
-        verify_path = os.path.join(VERIFY_DIR, f"verify{i}.jpg")
+        verify_path = os.path.join(verify_dir, f"verify{i}.jpg")
         save_patch(crop_img, verify_path)
         crop_paths.append(verify_path)
         orig_bboxes.append(orig_bbox)
@@ -94,34 +95,3 @@ def verify_node(state: WaldoState) -> dict:
         "candidates": candidates,
         "verified_result": verified_result,
     }
-
-
-# ── 内部工具 ───────────────────────────────────────────────────────────
-
-def _expand_bbox(
-    bbox: list[int],
-    img_w: int,
-    img_h: int,
-    ratio: float,
-    min_size: int,
-) -> list[int]:
-    """向外扩展 bbox，给 VLM 更多上下文，并保证最小边长。"""
-    x, y, w, h = bbox
-    pad_x = int(w * ratio)
-    pad_y = int(h * ratio)
-    x1 = max(0, x - pad_x)
-    y1 = max(0, y - pad_y)
-    x2 = min(img_w, x + w + pad_x)
-    y2 = min(img_h, y + h + pad_y)
-
-    # 保证最小边长
-    if x2 - x1 < min_size:
-        extra = (min_size - (x2 - x1)) // 2
-        x1 = max(0, x1 - extra)
-        x2 = min(img_w, x2 + extra)
-    if y2 - y1 < min_size:
-        extra = (min_size - (y2 - y1)) // 2
-        y1 = max(0, y1 - extra)
-        y2 = min(img_h, y2 + extra)
-
-    return [x1, y1, x2 - x1, y2 - y1]

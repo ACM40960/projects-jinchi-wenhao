@@ -10,6 +10,7 @@ class WaldoState(TypedDict):
 
     # ── 最终结果 ──────────────────────────────────────
     verified_result: list | None    # [x, y, w, h]（原图坐标），未找到则 None
+    result_image_path: str | None   # visualize 落盘的标注图路径，未找到则 None
 
 
 def initial_state(image_path: str) -> WaldoState:
@@ -18,4 +19,5 @@ def initial_state(image_path: str) -> WaldoState:
         original_image_path=image_path,
         candidates=[],
         verified_result=None,
+        result_image_path=None,
     )

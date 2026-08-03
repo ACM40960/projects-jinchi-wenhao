@@ -70,3 +70,44 @@ def waldo_orig_bbox(patch_bbox: list[int], waldo_bbox_in_patch: list[int] | None
     px, py = patch_bbox[0], patch_bbox[1]
     wx, wy, ww, wh = waldo_bbox_in_patch
     return [px + wx, py + wy, ww, wh]
+
+
+def expand_bbox(
+    bbox: list[int],
+    img_w: int,
+    img_h: int,
+    ratio: float,
+    min_size: int,
+) -> list[int]:
+    """向外扩展 bbox 并保证最小边长，结果 clamp 在图像范围内。
+
+    verify 用它给 VLM 更多上下文；handler 用它裁给页面看的 Waldo 特写图。
+
+    Args:
+        bbox: [x, y, w, h]，原图坐标。
+        img_w / img_h: 原图尺寸，用于 clamp。
+        ratio: 相对 bbox 宽/高向外扩展的比例。
+        min_size: 扩展后的最小边长（像素）。
+
+    Returns:
+        扩展后的 [x, y, w, h]。
+    """
+    x, y, w, h = bbox
+    pad_x = int(w * ratio)
+    pad_y = int(h * ratio)
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_y)
+    x2 = min(img_w, x + w + pad_x)
+    y2 = min(img_h, y + h + pad_y)
+
+    # 保证最小边长
+    if x2 - x1 < min_size:
+        extra = (min_size - (x2 - x1)) // 2
+        x1 = max(0, x1 - extra)
+        x2 = min(img_w, x2 + extra)
+    if y2 - y1 < min_size:
+        extra = (min_size - (y2 - y1)) // 2
+        y1 = max(0, y1 - extra)
+        y2 = min(img_h, y2 + extra)
+
+    return [x1, y1, x2 - x1, y2 - y1]
