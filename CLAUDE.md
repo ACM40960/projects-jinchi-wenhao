@@ -35,14 +35,38 @@
 > **目标**：把整个项目部署为 AWS 上的 Lambda 函数，对外契约 = 进一张图 → 出一个识别结果（bbox + 结果图）。
 > **状态**：架构见下方「目标架构：方案 ①」；**代码改造已完成**（`config.py` / `handler.py` / `web/index.html` / `deploy/`），设计文档见 `docs/superpowers/specs/2026-08-03-lambda-deployment-design.md`。**尚未真正部署上 AWS**（本地未装 Docker，镜像构建未验证）。下方「硬约束」是设计依据。
 
+### 2026-08-03 落地记录
+
+**做完了什么**（两个 commit：`refactor: make output paths configurable...` + `feat: add AWS Lambda deployment scaffold...`）：
+
+| 新增 | 作用 |
+|------|------|
+| `config.py` | 输出目录抽象。`WALDO_OUTPUT_DIR` 一改就整体切到 `/tmp`；`reset_run_dirs()` 清上次的 patch/verify，防容器复用把 `/tmp`（512MB）撑满 |
+| `agent/result.py` | `summarize(state)` → `{found, bbox, source, result_image_path}`，CLI 与 handler 共用一份判定 |
+| `handler.py` | Lambda 同步入口。`GET /` 出页面、`POST /detect` 出结果；400/404/500 全部收敛，不让 Lambda 抛裸栈；上传图在 `finally` 里删 |
+| `web/index.html` | 无依赖单页：canvas 压缩上传 → 等待计时 → 本地画框 + 特写 |
+| `deploy/` | `Dockerfile`（`public.ecr.aws/lambda/python:3.12`）+ `template.yaml`（SAM）+ `samconfig.toml` + `README.md` |
+| `.dockerignore` | 挡住 `yolo/`（`.pt` 权重 + docx/pdf）、`original-images/` 等，否则镜像白胖几百 MB |
+| `tests/test_{config,result,handler}.py` | 打桩 `run_pipeline`，不打 API |
+
+**顺带修的既有问题**：`visualize_node` 原本返回 `{}`，标注图路径直接丢掉 → 改为写回 `result_image_path`；`verify.py` 的私有 `_expand_bbox` 提到 `vision/segment.py::expand_bbox` 供 handler 复用；`main.py` 里那段「verify 跑没跑过」的判定并进 `summarize`。
+
+**验证状态**：`pytest tests/ -q` → **52 passed**（全程无 API 调用）。
+
+**下一步（Docker 相关，尚未处理）**：
+1. 开发机**没装 Docker**（`docker: command not found`），`deploy/Dockerfile` 只经人工检查，`sam build` 一次没跑过 —— 这是本次交付里唯一无证据支撑的部分。
+2. 装好后先按 `deploy/README.md` 的「本地验证镜像」跑 RIE（`docker run -p 9000:8080`）确认 handler 在容器里能起、`GET /` 能出 HTML。
+3. 再 `sam build && sam deploy --parameter-overrides GoogleApiKey=...` 上 AWS 拿 Function URL。
+4. 端到端跑一张真图，记录冷启动耗时与单图总耗时。
+
 ### 必须先解决的硬约束（决定怎么改）
 
 1. **执行时长 vs Lambda 超时**：Lambda 单次调用上限 **15 分钟**。当前单图 pipeline 是 ~60 次 detect + 1 次 verify 的 Gemini 调用，`MAX_CONCURRENT=10` 下数分钟级、且受 Gemini 429/503 退避影响可能更久。需评估：是否压缩到 15 分钟内（提并发 / 减 patch），还是改异步 job 模型。
 2. **同步 vs 异步**：「进图→出结果」若走同步、且前面挂 **API Gateway（集成超时硬上限 29 秒）**，分钟级任务必挂。可选：① 异步 job（提交返回 job id，结果落 S3，客户端轮询）；② Step Functions 编排 segment→detect→verify→visualize（detect 用 Map 真并行）；③ Lambda Function URL 直连撑到 15min 的同步等待（脆）。
 3. **打包体积与依赖**：依赖已砍到只剩 Pillow（含原生库）+ google-generativeai。Lambda zip 解压上限 250MB，Pillow 原生库 + grpc 仍偏大，倾向 **容器镜像部署**（最高 10GB）省心。
-4. **入口适配**：当前唯一入口是 CLI（`main.py` → `run_pipeline`）。Lambda 需写一个 handler 调 `run_pipeline(image_path)`，返回 bbox + 结果图位置。
-5. **存储不可写本地盘**：节点会往 `outputs/patches`、`outputs/verify`、`outputs/{name}_result.jpg` 写文件（见 `detect.py:PATCH_DIR` / `verify.py:VERIFY_DIR` / `visualize.py:OUTPUT_DIR`）。Lambda 只有 `/tmp`（临时、≤10GB）。需把文件 I/O 抽象成可插拔后端（本地 / S3），输入图也从 S3/事件取。
-6. **密钥管理**：`GOOGLE_API_KEY` 现从 `.env`（`main.py` 的 `load_dotenv`）读。Lambda 应走环境变量或 **Secrets Manager / SSM Parameter Store**，不打进镜像。
+4. ✅ **入口适配**（2026-08-03 已解决）：CLI 之外新增 `handler.py`，调 `run_pipeline(image_path)` 并返回 bbox。
+5. ✅ **存储不可写本地盘**（2026-08-03 已解决）：三处硬编码目录已抽成 `config.py` 的 `patches_dir()/verify_dir()/results_dir()`，Lambda 下由 `WALDO_OUTPUT_DIR=/tmp/outputs` 统一切换。**不引入 S3**——输入图由 handler 从请求体落到 `/tmp`。
+6. ✅ **密钥管理**（2026-08-03 已解决）：`GOOGLE_API_KEY` 由 SAM 参数注入 Lambda 环境变量，不进镜像、不进 git。未上 Secrets Manager（单个 demo key 属过度设计）。
 7. **SDK 弃用**：`google.generativeai` 已被官方标记弃用，建议迁到 `google.genai`（`llm/providers/gemini_client.py`）。
 8. **冷启动与成本**：容器镜像 + 原生依赖冷启动较慢；按时长计费，长跑任务（网络等 Gemini 的空等时间也计费）成本需估。
 
