@@ -129,17 +129,39 @@ Output:
 Artifacts land in `outputs/`: individual tiles in `patches/`, verify close-ups in `verify/`, and
 the annotated page as `outputs/<name>_result.jpg`.
 
+### Browser demo
+
+`serve.py` puts the same request handler written for the Lambda deployment behind a plain HTTP
+port, so the whole flow runs in a browser with nothing extra to install — no Docker, no cloud
+account:
+
+```bash
+python serve.py                    # open http://127.0.0.1:8000/
+python serve.py --host 0.0.0.0     # also reachable from other devices on the LAN
+```
+
+Pick a page, wait (~33 s — the UI shows an elapsed-time counter), and the box appears. The
+response carries only the bbox plus a small cropped close-up; the red rectangle is drawn
+client-side on the browser's own copy of the original, so no full-size image is ever sent back.
+
+> One detection at a time: each request clears the shared patch directory before it starts.
+
 Run the tests (no API calls, no key needed):
 
 ```bash
-pytest tests/ -q                   # 27 tests: tiling geometry, JSON parsing, routing
+pytest tests/ -q    # 58 tests: tiling geometry, JSON parsing, routing, handler, HTTP layer
 ```
 
 ## Project structure
 
 ```
 main.py                  Local CLI runner
+serve.py                 Local HTTP server for the browser demo
+handler.py               Request handler (written for AWS Lambda; used by serve.py too)
+config.py                Output-directory resolution (WALDO_OUTPUT_DIR)
 prompts.py               DETECT_PROMPT / SELECT_PROMPT
+web/index.html           Single-page front end, no dependencies
+deploy/                  AWS Lambda packaging (Dockerfile + SAM template) — see roadmap
 agent/
   pipeline.py            run_pipeline / stream_pipeline — plain-function orchestration
   state.py               WaldoState TypedDict
@@ -181,9 +203,12 @@ LangGraph version was removed once it was clear the graph encoded a single deter
 
 ## Roadmap
 
-- [ ] **Deploy on AWS Lambda** — container image behind a Function URL, synchronous
-      image-in/result-out. Architecture is chosen; local timing (≈33 s) is comfortably inside the
-      15-minute Lambda ceiling.
+- [ ] **Deploy on AWS Lambda** *(on hold)* — container image behind a Function URL, synchronous
+      image-in/result-out. Architecture is settled and the code is done: `handler.py`, `config.py`
+      and `deploy/` (Dockerfile + SAM template) are in the repo and unit-tested, and local timing
+      (≈33 s) sits comfortably inside the 15-minute Lambda ceiling. The image has never been built
+      — that needs a Docker/SAM/AWS toolchain this project does not currently justify, so
+      `serve.py` covers demos instead.
 - [ ] **Quantitative evaluation** — ground-truth annotations for `original-images/` plus an IoU
       hit-rate script, to replace per-image visual inspection.
 - [ ] **Network robustness** — detect already backs off on 429, but 503/504 and connection errors

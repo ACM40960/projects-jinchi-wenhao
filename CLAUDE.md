@@ -30,10 +30,13 @@
 
 ---
 
-## 部署目标：AWS Lambda（脚手架已落地，2026-08-03）
+## 部署：AWS Lambda（脚手架已完成，2026-08-12 起**搁置**）
 
-> **目标**：把整个项目部署为 AWS 上的 Lambda 函数，对外契约 = 进一张图 → 出一个识别结果（bbox + 结果图）。
-> **状态**：架构见下方「目标架构：方案 ①」；**代码改造已完成**（`config.py` / `handler.py` / `web/index.html` / `deploy/`），设计文档见 `docs/superpowers/specs/2026-08-03-lambda-deployment-design.md`。**尚未真正部署上 AWS**（本地未装 Docker，镜像构建未验证）。下方「硬约束」是设计依据。
+> **⚠️ 当前状态：搁置，不是主线。** 2026-08-12 用户决定放弃实际部署——课程即将结束，为跑通一次 `sam deploy` 而装 Docker + SAM CLI + AWS CLI 并开 AWS 账号，投入产出比不划算。
+>
+> **代码脚手架全部保留、未删任何文件**（`config.py` / `handler.py` / `web/index.html` / `deploy/`），`pytest tests/ -q` → 52 passed。想捡起来随时能接上，见下方「若将来恢复部署」。
+>
+> **原目标**：把整个项目部署为 AWS 上的 Lambda 函数，对外契约 = 进一张图 → 出一个识别结果（bbox + 结果图）。架构见下方「目标架构：方案 ①」，设计文档见 `docs/superpowers/specs/2026-08-03-lambda-deployment-design.md`。**从未真正部署上 AWS**——镜像一次也没构建过。下方「硬约束」是设计依据，仍然有效。
 
 ### 2026-08-03 落地记录
 
@@ -53,11 +56,35 @@
 
 **验证状态**：`pytest tests/ -q` → **52 passed**（全程无 API 调用）。
 
-**下一步（Docker 相关，尚未处理）**：
-1. 开发机**没装 Docker**（`docker: command not found`），`deploy/Dockerfile` 只经人工检查，`sam build` 一次没跑过 —— 这是本次交付里唯一无证据支撑的部分。
-2. 装好后先按 `deploy/README.md` 的「本地验证镜像」跑 RIE（`docker run -p 9000:8080`）确认 handler 在容器里能起、`GET /` 能出 HTML。
-3. 再 `sam build && sam deploy --parameter-overrides GoogleApiKey=...` 上 AWS 拿 Function URL。
-4. 端到端跑一张真图，记录冷启动耗时与单图总耗时。
+### 2026-08-12 部署前审计 + 搁置决定
+
+部署前把 `deploy/` 与 `handler.py` 完整审了一遍，结论是**代码没问题、工具链全缺**，随后决定搁置。
+
+**已验证 OK 的部分**：
+- `pytest tests/ -q` → 52 passed（无 API 调用）。
+- 运行期 import 干净：全项目只依赖 `PIL` + `google.generativeai` + 标准库；`dotenv` 只出现在 `main.py`，而 Dockerfile 没拷它——镜像里不会缺包。
+- `Dockerfile` 的 COPY 列表覆盖 handler 的完整依赖链；`template.yaml` 的 `DockerContext: ..` 相对 `deploy/` 解析到仓库根，与根目录 `.dockerignore` 位置一致。**配置本身是对的**（但仍未经 `sam build` 实证）。
+
+**工具链缺口（真正的阻塞，也是搁置的直接原因）**：`docker` / `sam` / `aws` 三个命令在开发机上**全部 NOT FOUND**。
+
+**审计发现的 4 个问题（未修，若恢复部署必须先处理前两个）**：
+
+1. ❗ **`/tmp` 结果图只增不减——真泄漏**。`config.reset_run_dirs()` 只删 `patches/` 与 `verify/`，**不碰 `results_dir()`**。`visualize_node`（`agent/nodes/visualize.py:28`）每次请求写一张 `{uuid}_result.jpg`，文件名带 uuid 故永不覆盖，温容器复用下持续堆积至 `/tmp` 的 512MB 上限。而这张图 handler 根本不回传（`handler.py:88` 直接 `result.pop("result_image_path")`）——纯写盘、纯浪费。
+2. ❗ **计费类 429 会烧满 900s 超时**。`_call_vlm`（`agent/nodes/detect.py:123`）把**所有** 429 当限流退避（15→30→60→120s，单 patch 最坏 225s）。额度耗尽时重试毫无意义，10 并发 × ~60 patch 会吃满 `Timeout: 900`，为一次注定失败的调用付满 900s × 2GB 的钱。本地跑只是白等，线上是白付钱。
+3. **公开 URL 无防护**。`template.yaml` 是 `AuthType: NONE`，且模板里**没有 `ReservedConcurrentExecutions`**。被批量刷的话 Gemini 账单（~$0.09/图）没有上限。
+4. **`MAX_IMAGE_BYTES = 8MB` 是够不着的阈值**。Function URL 请求 payload 硬上限 6MB，base64 膨胀 4/3 → 实际能到达 handler 的解码图最多 ~4.4MB，更大的请求被 AWS 直接挡回。该检查在 4.4MB 以上是死代码，线上表现为 AWS 的 413 而非 handler 的 400。
+
+### 若将来恢复部署
+
+按序做，前两步不依赖任何工具链：
+
+1. 先修上面的问题 1、2（纯本地改动，现有测试可兜底）。
+2. 建议顺手加问题 3 的并发上限。
+3. 装 Docker → `docker build -f deploy/Dockerfile -t waldo-lambda .` → 按 `deploy/README.md` 的「本地验证镜像」跑 RIE（`docker run -p 9000:8080`），确认 handler 在容器里能起、`GET /` 能出 HTML。
+4. 装 SAM CLI + AWS CLI，配好凭据（需能建 Lambda / ECR / IAM 角色 / CloudFormation 栈的账号）→ `sam build && sam deploy --parameter-overrides GoogleApiKey=...` 拿 Function URL。
+5. 端到端跑 `1.jpg` 与 `2.jpg`，记录冷启动耗时与单图总耗时。
+
+> **仍未实测的未知数**：冷启动耗时（容器镜像 + Pillow/grpc，预计数秒~十几秒）、难图最坏耗时（只测过 1.jpg ≈ 33s 的单候选快路径，2.jpg 走 verify + 可能退避）、镜像体积与 ECR 推送耗时。
 
 ### 必须先解决的硬约束（决定怎么改）
 
@@ -357,7 +384,7 @@ WhereisWaldoAgent/
 
 ## 待确认 / 优化方向
 
-- [ ] **Lambda 化（当前主线）**：代码脚手架已落地（`config.py` / `handler.py` / `web/` / `deploy/`），单测全绿。**剩下的是真部署**：① 装 Docker 后跑 `sam build` 验证镜像能构建（现开发机无 Docker，Dockerfile 未验证）；② `sam deploy` 上 AWS 拿到 Function URL；③ 端到端跑一张真图，确认冷启动 + 单图耗时可接受。
+- [~] **Lambda 化（2026-08-12 起搁置，不再是主线）**：代码脚手架已完成且单测全绿（`config.py` / `handler.py` / `web/` / `deploy/`），但开发机缺 `docker`/`sam`/`aws` 全套工具链，为课程收尾期的投入产出比不划算，决定不实际部署。文件全部保留，恢复步骤与审计发现见上方「部署：AWS Lambda」一节。
 - [ ] **量化评测**：对 `original-images/` 建立 ground truth 标注 + IoU 命中率脚本。当前只能靠单图肉眼定性验证；这是检验 detect 召回 / verify 准确率 / bbox 精度的唯一可靠手段。
 - [ ] **网络鲁棒性**：Gemini 调用偶发 504/503 超时（实测 2.jpg 跑挂 3 个 patch）；detect 已有 429 退避，但对 503/504/连接错误也应纳入重试。
 - [ ] **计费类 429 快速失败**：detect 的重试把**所有** 429 当限流退避（15→30→60→120s），但「额度耗尽 / 日配额超限」的 429 重试无用，会让每张图空转 ~27 分钟、并污染成假阴性。应识别计费类 429 **直接抛出不重试**。
