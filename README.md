@@ -13,7 +13,6 @@
   <img src="https://img.shields.io/badge/Detector-YOLO26s-111F68" alt="YOLO26s detector">
   <img src="https://img.shields.io/badge/VLM-Gemini_3.5_Flash-4285F4?logo=googlegemini&logoColor=white" alt="Gemini 3.5 Flash">
   <img src="https://img.shields.io/badge/Imaging-Pillow-CC6699" alt="Pillow">
-  <img src="https://img.shields.io/badge/Deployment-AWS_Lambda-FF9900?logo=awslambda&logoColor=white" alt="AWS Lambda">
 </p>
 
 <p align="center">
@@ -33,7 +32,6 @@
 | Object detection | Ultralytics YOLO26s |
 | Vision-language model | Gemini 3.5 Flash via `google-generativeai` |
 | Image processing | Pillow |
-| Serving | Local HTTP demo and AWS Lambda-compatible handler |
 | Evaluation | Precision, recall, mAP@0.5, mAP@0.5:0.95, confusion matrix and PR curve |
 
 ## 📝 Abstract
