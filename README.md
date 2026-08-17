@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/Detector-YOLO26s-111F68" alt="YOLO26s detector">
   <img src="https://img.shields.io/badge/VLM-Gemini_3.5_Flash-4285F4?logo=googlegemini&logoColor=white" alt="Gemini 3.5 Flash">
-  <img src="https://img.shields.io/badge/Imaging-Pillow-CC6699" alt="Pillow">
+  <img src="https://img.shields.io/badge/Image_Processing-Pillow-CC6699" alt="Image Processing with Pillow">
 </p>
 
 <p align="center">
