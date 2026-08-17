@@ -9,6 +9,14 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Detector-YOLO26s-111F68" alt="YOLO26s detector">
+  <img src="https://img.shields.io/badge/VLM-Gemini_3.5_Flash-4285F4?logo=googlegemini&logoColor=white" alt="Gemini 3.5 Flash">
+  <img src="https://img.shields.io/badge/Imaging-Pillow-CC6699" alt="Pillow">
+  <img src="https://img.shields.io/badge/Deployment-AWS_Lambda-FF9900?logo=awslambda&logoColor=white" alt="AWS Lambda">
+</p>
+
+<p align="center">
   <a href="https://github.com/ACM40960/projects-jinchi-wenhao">Repository</a> ·
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-results">Results</a> ·
@@ -211,21 +219,15 @@ The VLM pipeline successfully localised Waldo across representative scenes using
 
 The experiments also confirmed that Gemini's numeric confidence is not a reliable ranking signal: it contradicted the binary `present` answer in **77%** of evaluated patches. The workflow therefore filters only on the binary answer and uses cross-candidate verification when several tiles are positive.
 
-<p align="center">
-  <img src="docs/assets/vlm-qualitative-results.png" alt="Representative Gemini VLM workflow outputs" width="900">
-</p>
-
 > [!IMPORTANT]
 > YOLO values above are detector validation metrics, while the VLM recall and false-positive rate are patch-level metrics and its latency/cost figures describe the single-candidate fast path. End-to-end bounding-box IoU has not yet been quantified on a shared benchmark, so the two methods should not be ranked directly from these results.
 
 ## 🖼️ Project Poster
 
-The corrected poster summarises the motivation, both workflows, quantitative and qualitative results, conclusions and future work. [Download the poster as a PDF](docs/assets/waldo-poster.pdf), or click the preview below to open it.
+The poster summarises the motivation, both workflows, quantitative and qualitative results, conclusions and future work.
 
 <p align="center">
-  <a href="docs/assets/waldo-poster.pdf">
-    <img src="docs/assets/waldo-poster.png" alt="Where's Waldo tiny-object detection project poster" width="900">
-  </a>
+  <a href="docs/assets/waldo-poster.pdf"><strong>📄 View / Download the Project Poster (PDF)</strong></a>
 </p>
 
 ## 🔭 Limitations and Future Work
