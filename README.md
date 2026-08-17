@@ -1,224 +1,247 @@
-# Where's Waldo Agent
+<p align="center">
+  <img src="docs/assets/waldo-character.png" alt="Waldo in his red-and-white striped outfit" width="190">
+</p>
 
-Find Waldo in a full-resolution *Where's Waldo?* illustration and return his bounding box in
-original-image coordinates — using a vision-language model as a **classifier**, not as a
-decision-maker.
+<h1 align="center">🔎 Where's Waldo?</h1>
 
-![Detection result: Waldo located and boxed in a dense crowd scene](docs/demo.jpg)
+<p align="center">
+  <strong>Tiny-object localisation with a tiled YOLO26s detector and a training-free Gemini VLM workflow</strong>
+</p>
 
-*Input: a 2048×1251 crowd scene. Output: `bbox = [x, y, w, h]` plus the annotated image above.*
+<p align="center">
+  <a href="https://github.com/ACM40960/projects-jinchi-wenhao">Repository</a> ·
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-results">Results</a> ·
+  <a href="#-project-poster">Poster</a>
+</p>
 
 ---
 
-## Why this is hard
+## 🧰 Tech Stack
 
-A *Where's Waldo* page is an adversarial needle-in-a-haystack problem, deliberately designed
-to defeat exactly the heuristics a model would like to use:
+| Area | Technology |
+|---|---|
+| Language | Python 3.10+ |
+| Object detection | Ultralytics YOLO26s |
+| Vision-language model | Gemini 3.5 Flash via `google-generativeai` |
+| Image processing | Pillow |
+| Serving | Local HTTP demo and AWS Lambda-compatible handler |
+| Evaluation | Precision, recall, mAP@0.5, mAP@0.5:0.95, confusion matrix and PR curve |
 
-- **Scale.** Waldo occupies roughly 30–50 px in a 2000 px-wide image — under 0.1% of the pixels.
-  Feed the whole page to a VLM and he is gone in the downscale.
-- **Decoys.** The pages are full of red-and-white stripes, round glasses and bobble hats worn by
-  *other* characters. Colour or texture matching produces a flood of false positives.
-- **Occlusion.** His striped shirt — the feature everyone thinks of first — is frequently hidden
-  behind other figures. Only the hat and glasses are reliably visible.
+## 📝 Abstract
 
-The approach here: slice the page into overlapping tiles small enough for a VLM to actually see
-detail, ask a cheap binary question per tile, then resolve the surviving candidates against each
-other.
+Finding Waldo is a challenging tiny-object detection problem: he occupies only a small fraction of a crowded illustration, may be partly occluded, and is surrounded by visually similar distractors. This project compares two complementary approaches:
 
-## How it works
+1. a **tiled YOLO26s detector** trained on object-centred Waldo tiles; and
+2. a **training-free Gemini vision-language workflow** that classifies overlapping patches and verifies competing candidates.
 
-This is a **deterministic workflow, not an LLM-driven agent.** Control flow is fixed in code —
-one linear path plus one `if len(candidates) > 1` branch. The VLM is only ever asked to classify
-or compare; it never chooses the next step.
+The strongest YOLO configuration used 416 × 416 centred tiles and achieved **0.857 precision**, **0.508 recall**, **0.544 mAP@0.5** and **0.228 mAP@0.5:0.95**. The VLM workflow instead uses deterministic tiling and binary visual decisions to find likely Waldo regions without training a detector. In patch-level evaluation, it reached **94.4% recall** with a **4.9% false-positive rate**; a single-candidate fast-path scene completed in about **33 seconds** at an estimated API cost of **$0.09**. Across both methods, tiling is the key idea: it preserves the small visual details that disappear when an entire high-resolution scene is downscaled.
 
-```
-[segment]   Deterministic geometry. Sliding window over the full image at a fixed
-            256×256 px tile size, 15% overlap, last tile snapped to the edge.
-            No VLM call.
-   ↓
-[detect]    gemini-3.5-flash on every tile, 10 concurrent workers.
-            Binary question: "is Waldo in this patch?"
-            Filter on the boolean `present` signal only.
-   ↓
-   ├── >1 candidate ──→ [verify]   All surviving candidates re-cropped from the
-   │                                original image with 30% padding, sent to the
-   │                                VLM in a SINGLE request for side-by-side
-   │                                single-choice selection.
-   │                        ↓
-   └── ≤1 candidate ────────┴────→ [visualize]  Draw the red box, save the result.
-```
+## 🎯 Project Description
 
-Entry point is `run_pipeline(image_path)` in `agent/pipeline.py`, which returns the final state;
-`stream_pipeline(image_path)` yields `(node, delta)` per step for progress reporting.
+*Where's Waldo?* scenes are deliberately difficult for computer vision:
 
-## Design decisions worth explaining
+- **Tiny target:** Waldo may occupy less than 0.1% of the full image.
+- **Heavy clutter:** hundreds of characters compete for attention.
+- **Look-alike distractors:** red-and-white stripes, glasses and hats are repeated throughout the scene.
+- **Occlusion:** Waldo's most recognisable features may be partly hidden.
 
-Each of these cost real API budget to establish. They are the interesting part of the project.
+To study this problem from two directions, the project implements both a supervised detector and a training-free VLM workflow.
 
-**Tile size is the core anchor: 256 px.**
-Everything else is downstream of how much detail the model can resolve. Below ~200 px, no prompt
-and no model recovers discriminative power — Waldo's absolute pixel size is simply too small.
-256 px is the safe lower bound that still catches the hardest pages in the test set.
-
-**The model's `confidence` is unusable — so it isn't used.**
-`gemini-3.5-flash` returns a `confidence` field that contradicts its own `present` flag 77% of the
-time, and happily assigns high scores to negatives. Sorting or thresholding on it is false
-precision. Detect filters on the **binary `present` signal only**, and preserves row-major patch
-order instead of a fake confidence ranking.
-
-**Don't enumerate Waldo's features in the prompt.**
-Counter-intuitive, but measured: listing "glasses / red-and-white hat" makes the model hallucinate
-matches in a crowd already full of both — false positives hit 100%. Listing "striped shirt" makes
-it *too* strict, because the shirt is usually occluded in a 256 px patch — recall collapses. The
-best-performing prompt lists nothing and says, in effect: *use your own knowledge of Waldo; he may
-be small, hidden or blurry, look carefully.*
-
-**Verify compares candidates against each other, not one at a time.**
-Judging each crop independently makes the model answer "yes" to several of them on dense pages,
-misled by stripe decoys — and then the tie-break picks the wrong one. Putting every candidate in
-one request and forcing a single choice (`{"choice": index, ...}`) removes the tie-break entirely
-and is measurably more accurate.
-
-**Verify is skipped when there is nothing to disambiguate.**
-Detect is precise enough that most pages yield exactly one candidate. A deterministic branch sends
-only multi-candidate pages through verify, which is where its cost is actually earned.
-
-## Measured behaviour
-
-| Metric | Value | Notes |
+| | Method A: Tiled YOLO26s | Method B: Gemini VLM workflow |
 |---|---|---|
-| Detect recall | 94.4% | Patch-level evaluation, `gemini-3.5-flash` @ 200 px |
-| Detect false-positive rate | 4.9% | Same evaluation |
-| End-to-end latency | ≈33 s | `1.jpg`, single-candidate fast path, no rate-limit backoff |
-| Cost per image | ≈$0.09 | ~60 detect calls + 1 verify at current Gemini pricing |
+| Learning setup | Trained single-class detector | No task-specific training |
+| Tile size | 416 × 416 | 256 × 256 |
+| Core decision | Bounding-box prediction | Binary “Waldo present?” classification |
+| Final localisation | Map detections back and apply cross-tile NMS | Verify candidates, then map the winner back |
+| Main trade-off | Needs labelled training data | Needs repeated VLM API calls |
 
-Model selection was decided by the same evaluation: `gemini-3.5-flash` beat `gpt-5.5`
-(recall 88.9% / FP ~20%) on the binary signal while being faster and cheaper, and both beat the
-smaller/cheaper models outright.
+## 🧭 Methodology
 
-> **Honest caveat:** these are patch-level numbers plus per-image spot checks. There is no
-> ground-truth bbox annotation set yet, so end-to-end IoU accuracy is not quantified — see the
-> roadmap.
+### Method A — Tiled YOLO26s Detector
 
-## Quick start
+The YOLO pipeline treats Waldo as a single object class.
 
-Requires **Python 3.10+** and a **paid** Google AI Studio key (the free tier's 20 requests/day is
-exhausted by a single image).
+1. **Prepare tiles.** Split each crowded scene into 416 × 416 tiles, including object-centred positive tiles and carefully selected background-only negatives.
+2. **Train the detector.** Fine-tune YOLO26s to detect Waldo while retaining enough local context around the tiny target.
+3. **Run tiled inference.** Examine overlapping tiles independently so Waldo is not lost during full-image resizing.
+4. **Restore full-image coordinates.** Translate tile-level boxes back to the original scene and remove duplicates with non-maximum suppression.
+
+The experiments compared 768-pixel tiles with 416-pixel centred tiles. The smaller centred configuration preserved the target at a more useful scale and produced the best validation result at epoch 55.
+
+### Method B — Training-Free Gemini VLM Workflow
+
+This route uses deterministic control flow; the VLM acts only as a classifier and candidate comparator.
+
+```text
+Full-resolution scene
+        ↓
+256 × 256 overlapping tiles (15% overlap)
+        ↓
+Gemini binary detection: “Is Waldo present?”
+        ↓
+0–1 candidate ───────────────→ map to original image
+2+ candidates → compare once → map the winner to original image
+        ↓
+Draw the final bounding box
+```
+
+Key design choices:
+
+- The last tile in each row and column is snapped to the image edge so no region is missed.
+- Up to 10 tile requests are evaluated concurrently.
+- Filtering uses only the binary `present` signal. Gemini's numeric confidence contradicted its own answer in **77%** of evaluated patches, so confidence-based ranking was rejected.
+- Candidate verification is skipped when there is nothing to disambiguate; multiple candidates are compared together in one request and forced into a single choice.
+
+## 🗂️ Project Structure
+
+```text
+projects-jinchi-wenhao/
+├── agent/                         # VLM workflow and deterministic orchestration
+│   ├── pipeline.py                # segment → detect → optional verify → visualise
+│   └── nodes/                     # individual workflow stages
+├── llm/                           # VLM interfaces and Gemini provider
+├── vision/                        # tiling, cropping and coordinate mapping
+├── yolo/                          # YOLO data, training, prediction and evaluation code
+│   ├── train_tiled_waldo.py
+│   ├── predict_tiled_waldo.py
+│   ├── evaluate_tiled_original.py
+│   ├── final_summary/             # selected experiment metrics
+│   └── runs/detect/               # checkpoints and evaluation plots
+├── web/index.html                 # browser demo
+├── tests/                         # 58 unit tests; no API key required
+├── original-images/               # example Waldo scenes
+├── main.py                        # command-line entry point
+├── serve.py                       # local browser demo server
+└── handler.py                     # AWS Lambda-compatible request handler
+```
+
+## 🚀 Quick Start
+
+### 1. Clone and install
 
 ```bash
-pip install -r requirements.txt
-pip install python-dotenv          # optional, only needed for .env loading
-
-echo "GOOGLE_API_KEY=your_key_here" > .env    # or export it in your shell
-
-python main.py                     # defaults to original-images/1.jpg
-python main.py original-images/2.jpg
+git clone https://github.com/ACM40960/projects-jinchi-wenhao.git
+cd projects-jinchi-wenhao
+python -m venv .venv
+python -m pip install -r requirements.txt
 ```
 
-Output:
+Activate the virtual environment, then add your Google AI Studio key to a `.env` file:
 
-```
-[segment] Generated 60 patches (tile=256 overlap=0.15)
-[detect] patches=60, workers=10
-[detect] 1/60 patches with present=true
-[visualize] Result saved → outputs/1_result.jpg  bbox=[705, 514, 39, 67]
-[main] Waldo located (detect-only, verify skipped) at bbox: [705, 514, 39, 67]
+```env
+GOOGLE_API_KEY=your_key_here
 ```
 
-Artifacts land in `outputs/`: individual tiles in `patches/`, verify close-ups in `verify/`, and
-the annotated page as `outputs/<name>_result.jpg`.
-
-### Browser demo
-
-`serve.py` puts the same request handler written for the Lambda deployment behind a plain HTTP
-port, so the whole flow runs in a browser with nothing extra to install — no Docker, no cloud
-account:
+`python-dotenv` is optional if you prefer `.env` loading:
 
 ```bash
-python serve.py                    # open http://127.0.0.1:8000/
-python serve.py --host 0.0.0.0     # also reachable from other devices on the LAN
+python -m pip install python-dotenv
 ```
 
-Pick a page, wait (~33 s — the UI shows an elapsed-time counter), and the box appears. The
-response carries only the bbox plus a small cropped close-up; the red rectangle is drawn
-client-side on the browser's own copy of the original, so no full-size image is ever sent back.
-
-> One detection at a time: each request clears the shared patch directory before it starts.
-
-Run the tests (no API calls, no key needed):
+### 2. Run the VLM workflow
 
 ```bash
-pytest tests/ -q    # 58 tests: tiling geometry, JSON parsing, routing, handler, HTTP layer
+python main.py original-images/1.jpg
 ```
 
-## Project structure
+The annotated result is written to `outputs/<image-name>_result.jpg`.
 
-```
-main.py                  Local CLI runner
-serve.py                 Local HTTP server for the browser demo
-handler.py               Request handler (written for AWS Lambda; used by serve.py too)
-config.py                Output-directory resolution (WALDO_OUTPUT_DIR)
-prompts.py               DETECT_PROMPT / SELECT_PROMPT
-web/index.html           Single-page front end, no dependencies
-deploy/                  AWS Lambda packaging (Dockerfile + SAM template) — see roadmap
-agent/
-  pipeline.py            run_pipeline / stream_pipeline — plain-function orchestration
-  state.py               WaldoState TypedDict
-  nodes/
-    segment.py           Deterministic fixed-size sliding-window tiling
-    detect.py            Concurrent per-tile VLM classification
-    verify.py            Side-by-side single-choice disambiguation
-    visualize.py         Draw the result box
-llm/                     VLM adapter layer (Gemini-only; factory kept extensible)
-  base.py                BaseVLMClient + tolerant JSON extraction
-  factory.py             get_vlm_client(provider)
-  providers/gemini_client.py
-vision/                  Pure image work, no VLM
-  segment.py             tile_region + patch→original coordinate mapping
-  image_utils.py         Crop / encode / save
-tools/visualize.py       bbox rendering
-tests/                   Core-logic unit tests
-original-images/         Test pages
+For the browser demo:
+
+```bash
+python serve.py
 ```
 
-## Tunable parameters
+Then open `http://127.0.0.1:8000/`.
 
-| File | Parameter | Default | Purpose |
-|---|---|---|---|
-| `agent/nodes/segment.py` | `TILE_SIZE` | 256 | Tile edge length in px — the key accuracy/cost knob |
-| | `TILE_OVERLAP` | 0.15 | Stops Waldo being split across a tile boundary |
-| | `MIN_PATCH_PX` | 150 | Skip tiles too small to be readable |
-| `agent/nodes/detect.py` | `MAX_CONCURRENT` | 10 | Parallel VLM calls (tuned for paid Tier 1, ~300 RPM) |
-| | `MAX_PATCHES_PER_ITER` | 80 | Hard tile cap; excess is sampled randomly, not truncated, to avoid systematically missing one corner |
-| | `MAX_RETRIES` / `RETRY_BASE_WAIT` | 4 / 15 s | 429 backoff: 15→30→60→120 s |
-| `agent/nodes/verify.py` | `VERIFY_MAX` | 12 | Safety cap on candidates sent for comparison |
-| | `PADDING_RATIO` / `MIN_VERIFY_SIZE` | 0.3 / 120 px | Context padding around each verify crop |
+### 3. Run tiled YOLO inference
 
-## Tech stack
+```bash
+python -m pip install -r yolo/requirements.txt
+python yolo/predict_tiled_waldo.py \
+  --weights yolo/runs/detect/waldo_tiled_416_center_neg05_s_80_tuned/weights/best.pt \
+  --source original-images/1.jpg \
+  --tile-size 416 \
+  --overlap 0.30 \
+  --imgsz 640 \
+  --conf 0.05
+```
 
-Python 3.10+ · Pillow · `google-generativeai` (`gemini-3.5-flash`) ·
-`concurrent.futures.ThreadPoolExecutor`. Two runtime dependencies, no agent framework — an earlier
-LangGraph version was removed once it was clear the graph encoded a single deterministic branch.
+## 📊 Results
 
-## Roadmap
+### YOLO26s quantitative results
 
-- [ ] **Deploy on AWS Lambda** *(on hold)* — container image behind a Function URL, synchronous
-      image-in/result-out. Architecture is settled and the code is done: `handler.py`, `config.py`
-      and `deploy/` (Dockerfile + SAM template) are in the repo and unit-tested, and local timing
-      (≈33 s) sits comfortably inside the 15-minute Lambda ceiling. The image has never been built
-      — that needs a Docker/SAM/AWS toolchain this project does not currently justify, so
-      `serve.py` covers demos instead.
-- [ ] **Quantitative evaluation** — ground-truth annotations for `original-images/` plus an IoU
-      hit-rate script, to replace per-image visual inspection.
-- [ ] **Network robustness** — detect already backs off on 429, but 503/504 and connection errors
-      should be retried too; and billing-type 429s should fail fast instead of burning ~27 minutes
-      of pointless backoff.
-- [ ] **Tile-size sweep** — 256 vs 384 recall/latency trade-off, once the evaluation harness exists.
-- [ ] **Migrate to `google.genai`** — `google.generativeai` is deprecated upstream.
+| Dataset configuration | Best epoch | Precision | Recall | mAP@0.5 | mAP@0.5:0.95 |
+|---|---:|---:|---:|---:|---:|
+| `data_tiled_768` | 65 | 0.49890 | 0.35644 | 0.28967 | 0.15775 |
+| **`data_tiled_416_center_neg05`** | **55** | **0.85744** | **0.50774** | **0.54352** | **0.22785** |
+
+<p align="center">
+  <img src="docs/assets/yolo-metrics-table.png" alt="YOLO experiment metric comparison" width="850">
+</p>
+
+The 416-pixel object-centred dataset substantially improved precision and mAP@0.5 over the 768-pixel setup. The remaining recall gap reflects the small training set and the wide visual variation across crowded scenes.
+
+<p align="center">
+  <img src="docs/assets/yolo-detections-grid.png" alt="YOLO detections across multiple Where's Waldo scenes" width="820">
+</p>
+
+<table>
+  <tr>
+    <th>Normalised confusion matrix</th>
+    <th>Precision–recall curve</th>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/yolo-confusion-matrix.png" alt="Normalised YOLO confusion matrix"></td>
+    <td><img src="docs/assets/yolo-precision-recall.png" alt="YOLO precision-recall curve"></td>
+  </tr>
+</table>
+
+### VLM quantitative and qualitative results
+
+The VLM pipeline successfully localised Waldo across representative scenes using both the single-candidate fast path and cross-candidate verification.
+
+| Metric | Result | Scope |
+|---|---:|---|
+| Patch recall | **94.4%** | Patch-level binary detection |
+| False-positive rate | **4.9%** | Patch-level binary detection |
+| Fast-path latency | **~33 s** | Single-candidate scene; verification skipped |
+| Estimated API cost | **~$0.09 / scene** | Same single-candidate fast path |
+
+The experiments also confirmed that Gemini's numeric confidence is not a reliable ranking signal: it contradicted the binary `present` answer in **77%** of evaluated patches. The workflow therefore filters only on the binary answer and uses cross-candidate verification when several tiles are positive.
+
+<p align="center">
+  <img src="docs/assets/vlm-qualitative-results.png" alt="Representative Gemini VLM workflow outputs" width="900">
+</p>
+
+> [!IMPORTANT]
+> YOLO values above are detector validation metrics, while the VLM recall and false-positive rate are patch-level metrics and its latency/cost figures describe the single-candidate fast path. End-to-end bounding-box IoU has not yet been quantified on a shared benchmark, so the two methods should not be ranked directly from these results.
+
+## 🖼️ Project Poster
+
+The corrected poster summarises the motivation, both workflows, quantitative and qualitative results, conclusions and future work. [Download the poster as a PDF](docs/assets/waldo-poster.pdf), or click the preview below to open it.
+
+<p align="center">
+  <a href="docs/assets/waldo-poster.pdf">
+    <img src="docs/assets/waldo-poster.png" alt="Where's Waldo tiny-object detection project poster" width="900">
+  </a>
+</p>
+
+## 🔭 Limitations and Future Work
+
+- Build a shared ground-truth evaluation set and report end-to-end IoU-based localisation accuracy for both methods.
+- Expand the YOLO training data and test stronger augmentation, including colour variation, cropping, scaling, occlusion and synthetic scenes.
+- Compare tile sizes and overlap ratios under a consistent accuracy, latency and cost protocol.
+- Improve API error handling and continue the planned AWS Lambda deployment work.
+
+## 👥 Contact
+
+- [Wenhao Zhang](https://github.com/WenhaoZhang0223)
+- [Jinchi Tang](https://github.com/78t87tg)
 
 ---
 
-<sub>Course project scaffold:
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/-bKyY6qM)
-[![Open in Visual Studio Code](https://classroom.github.com/assets/open-in-vscode-2e0aaae1b6195c2367325f4f02e2d04e9abb55f0b24a779b69b11b9e10269abc.svg)](https://classroom.github.com/online_ide?assignment_repo_id=23978583&assignment_repo_type=AssignmentRepo)</sub>
+<p align="center">
+  Built as an ACM40960 project · <a href="https://github.com/ACM40960/projects-jinchi-wenhao">View the repository</a>
+</p>
