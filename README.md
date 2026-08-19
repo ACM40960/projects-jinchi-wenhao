@@ -237,8 +237,8 @@ The poster summarises the motivation, both workflows, quantitative and qualitati
 
 ## 👥 Contact
 
-- [Wenhao Zhang](https://github.com/WenhaoZhang0223)
-- [Jinchi Tang](https://github.com/78t87tg)
+- [Wenhao Zhang](https://github.com/WenhaoZhang0223)  |  25211539
+- [Jinchi Tang](https://github.com/78t87tg)  |  25204395
 
 ---
 
