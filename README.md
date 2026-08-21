@@ -1,5 +1,7 @@
 # Where's Waldo Agent
 
+**Authors:** Jinchi Tang (25204395) · Wenhao Zhang (TBD)
+
 Find Waldo in a full-resolution *Where's Waldo?* illustration and return his bounding box in
 original-image coordinates — using a vision-language model as a **classifier**, not as a
 decision-maker.
@@ -101,6 +103,25 @@ smaller/cheaper models outright.
 > ground-truth bbox annotation set yet, so end-to-end IoU accuracy is not quantified — see the
 > roadmap.
 
+### Full-scene end-to-end evaluation (2026-08-14)
+
+The repository now includes a recovered 19-scene ground-truth set (18 positive, one intentional
+negative) and reproducible full-scene evaluation tools. The primary metric counts a positive as
+correct when the predicted-box centre lies inside the ground-truth box, and counts the negative
+scene as correct only when no box is returned. IoU thresholds are reported alongside it.
+
+| Pipeline/configuration | Full-scene accuracy | Positive localization | Negative specificity | Mean latency |
+|---|---:|---:|---:|---:|
+| VLM workflow baseline | 9/19 (47.4%) | 8/18 (44.4%) | 1/1 (100%) | 48.5 s |
+| Tiled YOLO, conf=0.05 | 16/19 (84.2%) | 16/18 (88.9%) | 0/1 (0%) | 2.5 s |
+| Tiled YOLO, conf=0.06 | **17/19 (89.5%)** | **16/18 (88.9%)** | **1/1 (100%)** | 2.5 s |
+
+The YOLO threshold was selected on these same 19 scenes, so 89.5% is a best-observed same-set
+result rather than an independent held-out estimate. Agent experiments that increased verify
+candidate count or crop context did not improve the tested failures and were reverted. See
+[`docs/e2e_evaluation_2026-08-14.md`](docs/e2e_evaluation_2026-08-14.md) for per-experiment results,
+error cases, metric definitions and limitations.
+
 ## Quick start
 
 Requires **Python 3.10+** and a **paid** Google AI Studio key (the free tier's 20 requests/day is
@@ -190,7 +211,7 @@ original-images/         Test pages
 | | `TILE_OVERLAP` | 0.15 | Stops Waldo being split across a tile boundary |
 | | `MIN_PATCH_PX` | 150 | Skip tiles too small to be readable |
 | `agent/nodes/detect.py` | `MAX_CONCURRENT` | 10 | Parallel VLM calls (tuned for paid Tier 1, ~300 RPM) |
-| | `MAX_PATCHES_PER_ITER` | 80 | Hard tile cap; excess is sampled randomly, not truncated, to avoid systematically missing one corner |
+| | `MAX_PATCHES_PER_ITER` | 160 | Safety cap; covers every tile in the current 19-scene evaluation set |
 | | `MAX_RETRIES` / `RETRY_BASE_WAIT` | 4 / 15 s | 429 backoff: 15→30→60→120 s |
 | `agent/nodes/verify.py` | `VERIFY_MAX` | 12 | Safety cap on candidates sent for comparison |
 | | `PADDING_RATIO` / `MIN_VERIFY_SIZE` | 0.3 / 120 px | Context padding around each verify crop |
@@ -209,8 +230,8 @@ LangGraph version was removed once it was clear the graph encoded a single deter
       (≈33 s) sits comfortably inside the 15-minute Lambda ceiling. The image has never been built
       — that needs a Docker/SAM/AWS toolchain this project does not currently justify, so
       `serve.py` covers demos instead.
-- [ ] **Quantitative evaluation** — ground-truth annotations for `original-images/` plus an IoU
-      hit-rate script, to replace per-image visual inspection.
+- [x] **Quantitative evaluation** — recovered 19-scene ground truth plus shared centre-hit/IoU
+      evaluation for both pipelines; expand with a larger held-out set and more negatives next.
 - [ ] **Network robustness** — detect already backs off on 429, but 503/504 and connection errors
       should be retried too; and billing-type 429s should fail fast instead of burning ~27 minutes
       of pointless backoff.
